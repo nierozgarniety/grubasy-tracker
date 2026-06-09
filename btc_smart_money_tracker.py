@@ -108,45 +108,38 @@ def find_pumps(prices, min_pump_pct=MIN_PUMP_PCT, window_days=3, top_n=TOP_PUMPS
 
 def get_blocks_in_window(ts_pump_start, hours_before_min, hours_before_max):
     """
-    Znajdź bloki BTC z okna [ts_pump_start - hours_before_max, ts_pump_start - hours_before_min].
-    Iteruje przez strony bloków mempool.space aż pokryje całe okno.
+    Znajdź bloki BTC z okna czasowego przed pompem.
+    Używa blockchain.info/blocks/{ts_ms} który zwraca bloki z danego dnia.
     """
     ts_window_end   = ts_pump_start - hours_before_min * 3600
     ts_window_start = ts_pump_start - hours_before_max * 3600
 
     blocks = []
-    cursor_ts = ts_window_end  # zaczynamy od końca okna i idziemy wstecz
+    seen_hashes = set()
 
-    for _ in range(30):  # max 30 stron = 450 bloków
+    # Pobierz bloki dla każdego dnia w oknie
+    day_ts = ts_window_start
+    while day_ts <= ts_window_end:
         try:
+            ts_ms = day_ts * 1000
             r = requests.get(
-                f"https://mempool.space/api/v1/blocks/{cursor_ts}",
+                f"https://blockchain.info/blocks/{ts_ms}?format=json",
                 headers=HEADERS, timeout=20
             )
-            if r.status_code != 200:
-                break
-            page = r.json()
-            if not page:
-                break
-
-            added = 0
-            for block in page:
-                bt = block.get("timestamp", 0)
-                if bt < ts_window_start:
-                    return blocks  # wyszliśmy poza okno
-                if bt <= ts_window_end:
-                    blocks.append(block)
-                    added += 1
-
-            # Następna strona — od najstarszego bloku na tej stronie
-            cursor_ts = page[-1].get("timestamp", 0) - 1
+            if r.status_code == 200:
+                day_blocks = r.json()
+                for b in day_blocks:
+                    bt   = b.get("time", 0)
+                    bhash = b.get("hash", "")
+                    if bhash in seen_hashes:
+                        continue
+                    if ts_window_start <= bt <= ts_window_end:
+                        blocks.append({"id": bhash, "timestamp": bt, "height": b.get("height")})
+                        seen_hashes.add(bhash)
             time.sleep(SLEEP_API)
-
-            if added == 0:
-                break
-
         except Exception:
-            break
+            pass
+        day_ts += 86400  # następny dzień
 
     return blocks
 
