@@ -1,121 +1,42 @@
 """
-Śledzenie portfeli grubasów v0.1.2
-- Ceny BTC: Binance API (darmowe, bez limitu, ceny godzinowe)
-- Transakcje: mempool.space API
-- Wynik: grubasy_ranking.csv
+Śledzenie portfeli cwaniaków v0.2.0
+====================================
+Nowa logika: szukamy smart money przez heurystykę czasową.
+
+KROK 1: Historia ceny BTC (Kraken) → znajdź 10 największych pompów (+15% w 72h)
+KROK 2: Dla każdego pompa → bloki z 24-72h PRZED nim (mempool.space)
+KROK 3: Z tych bloków → adresy które otrzymały duży wpływ BTC
+KROK 4: Zbierz unikalne adresy → policz win rate / smart score dla każdego
+KROK 5: Ranking → grubasy_ranking.csv
 """
 
 import requests, pandas as pd, numpy as np, time, json, os, sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from tqdm import tqdm
 
 # ════════════════════════════════════════════════
-TOP_N            = 80
-MAX_TX_PER_ADDR  = 50
-MIN_BTC_FLOW     = 0.01
-SLEEP_MEMPOOL    = 0.35
-OUTPUT_CSV       = "grubasy_ranking.csv"
-CACHE_FILE       = "grubasy_price_cache.json"
+TOP_PUMPS           = 10     # ile pompów szukamy
+MIN_PUMP_PCT        = 15     # minimalny % wzrostu w 72h
+WINDOW_BEFORE_H     = 72     # godziny przed pompem (max)
+WINDOW_AFTER_H      = 24     # godziny przed pompem (min — żeby nie liczyć "podczas")
+MIN_BTC_INFLOW      = 0.5    # minimalny wpływ BTC żeby uznać za kandydata
+MAX_CANDIDATES      = 150    # max adresów do analizy
+MAX_TX_PER_ADDR     = 60     # max transakcji na adres
+MIN_BTC_FLOW        = 0.05   # min BTC per transakcja (filtr szumu)
+MIN_TRADES          = 2      # min zamkniętych tradów żeby wejść do rankingu
+SLEEP_API           = 0.3
+OUTPUT_CSV          = "grubasy_ranking.csv"
+CACHE_FILE          = "grubasy_price_cache.json"
 # ════════════════════════════════════════════════
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
 
-WHALE_ADDRESSES = [
-    "34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo",
-    "bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97",
-    "1FeexV6bAHb8ybZjqQMjJrcCrHGW9sb6uF",
-    "1LdRcdxfbSnmCYYNdeYpUnztiYzVfBEQeC",
-    "1AC4fMwgY8j9onSbXEWeH6Zan8QGMSdmtA",
-    "1PnMfRF2enSZnR6JSexxBHuQnxG8Vo5FVX",
-    "1KYiKJEfdJtap9QX2v9BXJMpz2SfU4pgZw",
-    "1LruNZjwamWJXThX2Y8C2d47QqhAkkc5os",
-    "12tkqA9xSoowkzoERHMWNKsTey55YEBqkv",
-    "1P5ZEDWTKTFGxQjZphgWPQUpe554WKDfHQ",
-    "bc1qa5wkgaew2dkv56kfvj49j0av5nml45x9ek9hz6",
-    "1Ay8aZnAMPTCRJmBsHNSRnFMmEq3RR5qAZ",
-    "1FzWLkAahHooV3kzTgyx6qsswXJ6sCXkSR",
-    "1CXyk3bBpihTtqCaFkZFSLmoNbHFGBYzAG",
-    "1GR9qNz7zgtaW5HwwVpEJWMnGWhsbsieCG",
-    "1L07f8s9kS1c9qyFz9hJBPbFi7xFKEfMKr",
-    "1FBPzxps6gNPpPBFkKbdMBiK4mDNZxVEFq",
-    "1EHNa6Q4Jz2uvNExL497mE43ikXhwF6kZm",
-    "1HQ3Go3ggs8pFnXuHVHRytPCq5fGG8Hbhx",
-    "1FWQiwK27EnGXb6BiBMRLJvunJQZZPMcGd",
-    "17A16QmavnUfCW11DAApiJxp7ARnxN5pGX",
-    "15ubicBBWFnvoZLT7GiU2qxjRaKJPdkDMG",
-    "1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s",
-    "3D2oetdNuZUqQHPJmcMDDHYoqkyNVsFk9r",
-    "1HB5XMLmzFVj8ALj6mfBsbifRoD4miY36v",
-    "12ib7dApVFvg82TXKycWBNpN8kFyiAN1dr",
-    "14NWDXkQD89g9DHFDRrYicoqSxhFZ7BFoF",
-    "1MgpzbpFNF8yXkzfmMNfkTM7Fk3ESPH5bH",
-    "1CWmK9dMJK4S5RFcr1EUzFAaGCNuLSRuAC",
-    "1LcnbkmTWs9nJ8hEnRtVSXV3tXkBe4CTBS",
-    "17rmTnbGFE2ZZKRB95RNDCfCcaMGfbf7qS",
-    "3LYJfcfHkxYkNQu31nGaU1MKXS4Z3ZGML",
-    "3FHNBLobJnbCPGo3nevw5UD5jQjSgRiDHm",
-    "bc1qm34lsc65zpw79lxes69zkqmk6ee3ewf0j77s3h",
-    "1GdK9UzpHBzqL7CAY2QGAfPr6ZqwKfTP8",
-    "1CCqfPToSHMDSS7FHPcjGjfJv5HVHAfKFY",
-    "12t9YDPgwueZ9NyMgw519p7AA8isjr6SMw",
-    "1HckjUpRGcrrRAtFaaCAUaGjsPx9oYmLaZ",
-    "1MXNsZJp5RBkFQZXRxyMfNNd5235ioFy3e",
-    "3Kzh9qAqVWQhEsfQz7zEQL1EuSx5tyNLNS",
-    "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-    "1FoWyxwPXuj4C6abqwhjDWdz6D4PZgYRjA",
-    "35hK24tcLEWcgNA4JxpvbkNkoAcDGqQPsP",
-    "3E5bEQAFqoQjbbW4waBhBpFEzCsQBRBMCi",
-    "1LQoWist8KkaUXSPKZHNvEyfrEkPHzSsCd",
-    "1P5ZEDWTKTFGxQjZphgWPQUpe554WKDfHQ",
-    "1EM4e8eu2S93MKTMDj7EKZB5q6Kej6eDe7",
-    "385cR5DM96n1HvBDMzLHPYcw89fZAXULJP",
-    "1CounterpartyXXXXXXXXXXXXXXXUWLpVr",
-    "1DkyBEKt5S2GDtv7aQw6rQepAvnsRyHoYM",
-    "3MbYQ55HL8WRoGKM5BaGBVjCHf4dHbKXyg",
-    "bc1q4s8yps9my6hun2tpd5ke5nbqmznoeazorlhqhq",
-    "1L2GM8eE7mJWLdo3HZS6su1832NX2txaac",
-    "3LQUu4v9NvKmESWA2G2UBGy94MEsHE2U4K",
-    "3E35SFZkfLMGo4qX5aVs1oCKRRuLKRCZiS",
-    "17Vu7st1U1KwymZKtuSiMLfDoCxG6oAFTm",
-    "1BpEi6DfDAUFd153wiGrvkiubFb4PmKbkx",
-    "16ftSEQ4ctQFDtVZiUBusQUjRrGhM3JYwe",
-    "3AAzK4Xbu8PTM8AD7gMLargefmFFHLyVGX",
-    "bc1qhm6697d9d2224vfyt8mj4kw03ncec7a7fdafgt",
-    "1AJbsFZ64EpEfS5UAjAfcUG8pH8Jn3rn1F",
-    "1Bh9JwSMF9eoQM3bJwExCBbCjJFyNr6hiZ",
-    "bc1qjasf9z3h7ex55vynatne4s0a6qe7keq0sxfhnm",
-    "1dice8EMZmqKvrGE4Qc9bUFKqEsnKGRNRR",
-    "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
-    "1HB5XMLmzFVj8ALj6mfBsbifRoD4miY36v",
-    "3LCGsSmfr24demGvriN4e3ft8wEcDuHFqh",
-    "bc1qd4ysezhmypwty5dnyvari9t3hu3xp2s9mtg2dm",
-    "1LoVGDgRs9hTfTNJNuXKSpywcbdvwRXpmK",
-    "3QW9oHJqvUwnSKMGlBGDdKNTVoFtPSSJe8",
-    "1LdRcdxfbSnmCYYNdeYpUnztiYzVfBEQeC",
-    "bc1qrxqjp6zvcs3vkqhzs7ywzs2t53swlqnhpn0fxq",
-    "1Jd3ktZFCNMDKBXDuQHEGpSHM9D8aDanmz",
-    "3NukJ6fYZJ5Kk8bPjycAnruZkE5Q7UW7i8",
-    "1Q7RBzFDzP8G2GQSgJbkuHMtwJ9khJ7aF9",
-    "bc1qcu4xhsvgjzwxl9rj2rp9a4djqjqvq6g3vqjkhx",
-    "3Nxwenay9Z8Lc9JBiywExpnEFiLp6Afp8v",
-    "1JCe8z4jJVNXSjohjFcFtkfuQYd7AxBhTm",
-]
+def log(msg): print(f"  {msg}", flush=True)
 
-# Deduplicate
-seen, WHALE_ADDRESSES_CLEAN = set(), []
-for a in WHALE_ADDRESSES:
-    a = a.strip()
-    if a not in seen and len(a) >= 26 and ' ' not in a:
-        seen.add(a)
-        WHALE_ADDRESSES_CLEAN.append(a)
-
-def ts_to_date(ts):
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-
-def btc(sats):
-    return sats / 1e8
-
-# ── Ceny BTC z Binance (godzinowe klines) ────────────────────────────────────
+# ── Cache ─────────────────────────────────────────────────────────────────────
 
 def load_cache():
     try:
@@ -128,51 +49,181 @@ def save_cache(cache):
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f)
 
-def get_price_binance(timestamp_ms, cache):
+# ── KROK 1: Historia ceny BTC + znajdź pompy ─────────────────────────────────
+
+def get_btc_price_history():
+    """Pobiera dzienną historię BTC/USD z ostatnich 2 lat (Kraken OHLC)."""
+    log("Pobieram historię ceny BTC (Kraken)...")
+    prices = []  # lista (timestamp, close_price)
+    try:
+        # Kraken daje max 720 świec — bierzemy dzienne (1440 min)
+        r = requests.get(
+            "https://api.kraken.com/0/public/OHLC",
+            params={"pair": "XBTUSD", "interval": 1440},
+            headers=HEADERS, timeout=20
+        )
+        if r.status_code == 200:
+            data = r.json()
+            ohlc = data.get("result", {}).get("XXBTZUSD", [])
+            prices = [(int(row[0]), float(row[4])) for row in ohlc]  # (ts, close)
+            log(f"Pobrano {len(prices)} dni historii ceny")
+    except Exception as e:
+        log(f"Błąd historii ceny: {e}")
+    return prices
+
+def find_pumps(prices, min_pump_pct=MIN_PUMP_PCT, window_days=3, top_n=TOP_PUMPS):
     """
-    Pobiera cenę BTC/USDT z Binance dla danego timestamp (ms).
-    Używa klines 1h — zwraca cenę zamknięcia świecy.
-    Cache key = timestamp zaokrąglony do godziny.
+    Znajdź momenty gdzie cena wzrosła o min_pump_pct% w ciągu window_days dni.
+    Zwraca listę (ts_start, ts_end, pct_change) posortowaną po wielkości pompa.
     """
-    # Zaokrąglij do godziny
+    pumps = []
+    for i in range(len(prices) - window_days):
+        ts_start, p_start = prices[i]
+        ts_end,   p_end   = prices[i + window_days]
+        pct = (p_end - p_start) / p_start * 100
+        if pct >= min_pump_pct:
+            pumps.append((ts_start, ts_end, round(pct, 1), p_start, p_end))
+
+    # Deduplicate — usuń nakładające się okna, zostaw największe
+    pumps.sort(key=lambda x: -x[2])
+    deduped = []
+    used_ts = set()
+    for pump in pumps:
+        ts_s, ts_e = pump[0], pump[1]
+        overlap = any(abs(ts_s - u) < 86400 * window_days for u in used_ts)
+        if not overlap:
+            deduped.append(pump)
+            used_ts.add(ts_s)
+        if len(deduped) >= top_n:
+            break
+
+    log(f"Znaleziono {len(deduped)} pompów ≥{min_pump_pct}%:")
+    for p in deduped:
+        dt = datetime.fromtimestamp(p[0], tz=timezone.utc).strftime("%Y-%m-%d")
+        log(f"  {dt}  +{p[2]}%  (${int(p[3])} → ${int(p[4])})")
+
+    return deduped
+
+# ── KROK 2: Bloki przed pompem ────────────────────────────────────────────────
+
+def get_blocks_in_window(ts_pump_start, hours_before_min, hours_before_max):
+    """
+    Znajdź bloki BTC z okna [ts_pump_start - hours_before_max, ts_pump_start - hours_before_min].
+    Używa mempool.space /api/v1/blocks/:timestamp
+    """
+    ts_window_end   = ts_pump_start - hours_before_min * 3600
+    ts_window_start = ts_pump_start - hours_before_max * 3600
+
+    blocks = []
+    try:
+        # Pobierz bloki zaczynając od końca okna
+        r = requests.get(
+            f"https://mempool.space/api/v1/blocks/{ts_window_end}",
+            headers=HEADERS, timeout=20
+        )
+        if r.status_code == 200:
+            data = r.json()
+            for block in data:
+                bt = block.get("timestamp", 0)
+                if ts_window_start <= bt <= ts_window_end:
+                    blocks.append(block)
+        time.sleep(SLEEP_API)
+    except Exception as e:
+        pass
+
+    return blocks
+
+# ── KROK 3: Adresy z wpływem BTC z bloków ────────────────────────────────────
+
+def get_top_receivers_from_block(block_hash, min_btc=MIN_BTC_INFLOW, max_addrs=20):
+    """
+    Pobierz transakcje z bloku, znajdź adresy które otrzymały ≥ min_btc BTC.
+    """
+    receivers = {}
+    try:
+        r = requests.get(
+            f"https://mempool.space/api/block/{block_hash}/txs/0",
+            headers=HEADERS, timeout=20
+        )
+        if r.status_code == 200:
+            txs = r.json()
+            for tx in txs:
+                # Sumuj outputy per adres
+                for out in tx.get("vout", []):
+                    addr = out.get("scriptpubkey_address")
+                    val  = out.get("value", 0) / 1e8
+                    if addr and val >= 0.01:
+                        receivers[addr] = receivers.get(addr, 0) + val
+
+        time.sleep(SLEEP_API)
+    except Exception:
+        pass
+
+    # Filtruj i sortuj
+    filtered = {a: v for a, v in receivers.items() if v >= min_btc}
+    sorted_r  = sorted(filtered.items(), key=lambda x: -x[1])
+    return sorted_r[:max_addrs]
+
+# ── KROK 4: Cena BTC dla timestamp ───────────────────────────────────────────
+
+def get_price(timestamp_ms, cache):
     hour_ts = (timestamp_ms // 3_600_000) * 3_600_000
     key = str(hour_ts)
-
     if key in cache:
         return cache[key]
 
+    # Binance
     try:
-        url = "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol":    "BTCUSDT",
-            "interval":  "1h",
-            "startTime": hour_ts,
-            "limit":     1
-        }
-        r = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            if data:
-                price = float(data[0][4])  # close price
-                cache[key] = price
-                save_cache(cache)
-                return price
-    except Exception:
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1h", "startTime": hour_ts, "limit": 1},
+            headers=HEADERS, timeout=15
+        )
+        if r.status_code == 200 and r.json():
+            price = float(r.json()[0][4])
+            cache[key] = price
+            return price
+    except:
         pass
+
+    # Kraken fallback
+    try:
+        since = hour_ts // 1000 - 3600
+        r = requests.get(
+            "https://api.kraken.com/0/public/OHLC",
+            params={"pair": "XBTUSD", "interval": 60, "since": since},
+            headers=HEADERS, timeout=15
+        )
+        if r.status_code == 200:
+            ohlc = r.json().get("result", {}).get("XXBTZUSD", [])
+            if ohlc:
+                target = hour_ts // 1000
+                closest = min(ohlc, key=lambda x: abs(int(x[0]) - target))
+                price = float(closest[4])
+                cache[key] = price
+                return price
+    except:
+        pass
+
     return None
 
-# ── Transakcje mempool.space ─────────────────────────────────────────────────
+# ── KROK 5: Analiza portfela ──────────────────────────────────────────────────
 
 def get_address_txs(address):
-    url = f"https://mempool.space/api/address/{address}/txs"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        if r.status_code == 200:
-            time.sleep(SLEEP_MEMPOOL)
-            return r.json()[:MAX_TX_PER_ADDR]
-    except Exception:
-        pass
-    time.sleep(SLEEP_MEMPOOL)
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                f"https://mempool.space/api/address/{address}/txs",
+                headers=HEADERS, timeout=20
+            )
+            if r.status_code == 200:
+                time.sleep(SLEEP_API)
+                return r.json()[:MAX_TX_PER_ADDR]
+            elif r.status_code == 429:
+                time.sleep(10)
+        except:
+            time.sleep(2)
+    time.sleep(SLEEP_API)
     return []
 
 def parse_flows(address, txs):
@@ -193,35 +244,28 @@ def parse_flows(address, txs):
             for out in tx.get("vout", [])
             if out.get("scriptpubkey_address") == address
         )
-        net_btc = btc(received - spent)
+        net_btc = (received - spent) / 1e8
         if abs(net_btc) < MIN_BTC_FLOW:
             continue
         flows.append({
             "timestamp":    block_time,
             "timestamp_ms": block_time * 1000,
-            "date":         ts_to_date(block_time),
+            "date":         datetime.fromtimestamp(block_time, tz=timezone.utc).strftime("%Y-%m-%d"),
             "net_btc":      net_btc,
             "direction":    "IN" if net_btc > 0 else "OUT"
         })
     return flows
 
-# ── Analiza portfela ─────────────────────────────────────────────────────────
-
 def analyze(address, flows, cache):
     if not flows:
         return None
-
     flows = sorted(flows, key=lambda x: x["timestamp"])
-
-    # Pobierz ceny (Binance, godzinowe)
     for f in flows:
-        f["price"] = get_price_binance(f["timestamp_ms"], cache)
-
+        f["price"] = get_price(f["timestamp_ms"], cache)
     flows = [f for f in flows if f["price"]]
     if not flows:
         return None
 
-    # FIFO matching IN → OUT
     buy_stack, trades = [], []
     for f in flows:
         if f["direction"] == "IN":
@@ -233,34 +277,24 @@ def analyze(address, flows, cache):
                 matched = min(remaining, buy["btc"])
                 pnl_pct = (f["price"] - buy["price"]) / buy["price"] * 100
                 trades.append({
-                    "buy_date":   buy["date"],
-                    "sell_date":  f["date"],
-                    "btc":        matched,
-                    "buy_price":  buy["price"],
-                    "sell_price": f["price"],
-                    "pnl_pct":    pnl_pct,
+                    "buy_date": buy["date"], "sell_date": f["date"],
+                    "btc": matched, "buy_price": buy["price"],
+                    "sell_price": f["price"], "pnl_pct": pnl_pct,
                     "profit_usd": matched * (f["price"] - buy["price"]),
-                    "win":        pnl_pct > 0
+                    "win": pnl_pct > 0
                 })
                 buy["btc"] -= matched
-                remaining  -= matched
+                remaining -= matched
                 if buy["btc"] < 0.0001:
                     buy_stack.pop(0)
 
     total_in  = sum(f["net_btc"] for f in flows if f["direction"] == "IN")
     total_out = sum(abs(f["net_btc"]) for f in flows if f["direction"] == "OUT")
-    base = {
-        "address":       address,
-        "total_txs":     len(flows),
-        "total_btc_in":  round(total_in,  4),
-        "total_btc_out": round(total_out, 4),
-    }
+    base = {"address": address, "total_txs": len(flows),
+            "total_btc_in": round(total_in, 4), "total_btc_out": round(total_out, 4)}
 
-    if not trades:
-        avg_buy = np.mean([f["price"] for f in flows if f["direction"] == "IN"]) if any(f["direction"] == "IN" for f in flows) else None
-        return {**base, "status": "HODLER", "closed_trades": 0,
-                "win_rate": None, "avg_pnl_pct": None, "total_profit_usd": None,
-                "avg_buy_price": round(avg_buy, 0) if avg_buy else None, "smart_score": 0}
+    if len(trades) < MIN_TRADES:
+        return None  # Za mało danych — pomijamy
 
     win_rate    = len([t for t in trades if t["win"]]) / len(trades) * 100
     avg_pnl     = np.mean([t["pnl_pct"] for t in trades])
@@ -268,70 +302,112 @@ def analyze(address, flows, cache):
     confidence  = min(len(trades) / 8, 1.0)
     smart_score = (win_rate * 0.5 + np.clip(avg_pnl, -100, 200) * 0.3) * confidence
 
-    return {**base,
-        "status":           "TRADER",
-        "closed_trades":    len(trades),
-        "win_rate":         round(win_rate, 1),
-        "avg_pnl_pct":      round(avg_pnl, 1),
-        "total_profit_usd": round(tot_profit, 0),
-        "avg_buy_price":    round(np.mean([t["buy_price"] for t in trades]), 0),
-        "smart_score":      round(smart_score, 2)
-    }
+    return {**base, "status": "TRADER", "closed_trades": len(trades),
+            "win_rate": round(win_rate, 1), "avg_pnl_pct": round(avg_pnl, 1),
+            "total_profit_usd": round(tot_profit, 0),
+            "avg_buy_price": round(np.mean([t["buy_price"] for t in trades]), 0),
+            "smart_score": round(smart_score, 2)}
 
-# ── MAIN ─────────────────────────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
     print("=" * 62)
-    print("  ŚLEDZENIE PORTFELI GRUBASÓW v0.1.2")
-    print("  Ceny: Binance API (godzinowe, bez limitu)")
-    print("=" * 62)
+    print("  ŚLEDZENIE PORTFELI CWANIAKÓW v0.2.0")
+    print("  Tryb: heurystyka czasowa (smart money przed pompami)")
+    print("=" * 62 + "\n")
 
-    addresses = WHALE_ADDRESSES_CLEAN[:TOP_N]
-    print(f"\n  Załadowano {len(addresses)} adresów wielorybów")
-    print(f"  Pobieram transakcje i ceny...\n")
+    # Test API
+    for name, url in [
+        ("mempool.space", "https://mempool.space/api/v1/difficulty-adjustment"),
+        ("Binance",       "https://api.binance.com/api/v3/ping"),
+        ("Kraken",        "https://api.kraken.com/0/public/Time"),
+    ]:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            log(f"{name}: {'OK ✓' if r.status_code == 200 else 'BŁĄD ' + str(r.status_code)}")
+        except Exception as e:
+            log(f"{name}: BŁĄD ({e})")
 
     cache = load_cache()
-    cached_prices = len(cache)
-    results = []
 
-    for i, addr in enumerate(tqdm(addresses, desc="Analiza")):
+    # KROK 1: Pompy
+    print()
+    prices = get_btc_price_history()
+    if not prices:
+        log("Brak historii ceny — przerywam.")
+        pd.DataFrame().to_csv(OUTPUT_CSV, index=False)
+        return
+
+    pumps = find_pumps(prices)
+    if not pumps:
+        log("Nie znaleziono pompów — zmień parametry.")
+        pd.DataFrame().to_csv(OUTPUT_CSV, index=False)
+        return
+
+    # KROK 2 & 3: Zbierz kandydatów
+    print()
+    log("Szukam adresów aktywnych przed pompami...")
+    candidates = {}  # addr → max_inflow
+
+    for pump in pumps:
+        ts_pump, _, pct, _, _ = pump
+        dt = datetime.fromtimestamp(ts_pump, tz=timezone.utc).strftime("%Y-%m-%d")
+        log(f"Analizuję pompa {dt} +{pct}%...")
+
+        blocks = get_blocks_in_window(ts_pump, WINDOW_AFTER_H, WINDOW_BEFORE_H)
+        log(f"  Znaleziono {len(blocks)} bloków w oknie")
+
+        for block in blocks[:8]:  # max 8 bloków na pompa
+            block_hash = block.get("id")
+            if not block_hash:
+                continue
+            receivers = get_top_receivers_from_block(block_hash, MIN_BTC_INFLOW)
+            for addr, btc_val in receivers:
+                if addr not in candidates or candidates[addr] < btc_val:
+                    candidates[addr] = btc_val
+
+        log(f"  Kandydaci łącznie: {len(candidates)}")
+
+    # Sortuj po inflow, weź top MAX_CANDIDATES
+    top_candidates = sorted(candidates.items(), key=lambda x: -x[1])[:MAX_CANDIDATES]
+    log(f"\nŁącznie unikalnych kandydatów: {len(candidates)}")
+    log(f"Analizuję top {len(top_candidates)} po wielkości wpływu BTC\n")
+
+    # KROK 4 & 5: Analiza win rate
+    results = []
+    for i, (addr, inflow) in enumerate(tqdm(top_candidates, desc="Analiza")):
         txs   = get_address_txs(addr)
         flows = parse_flows(addr, txs)
         res   = analyze(addr, flows, cache)
         if res:
+            res["discovered_inflow_btc"] = round(inflow, 4)
             results.append(res)
-        if i % 10 == 0:
+        if i % 15 == 0:
             save_cache(cache)
 
     save_cache(cache)
 
     if not results:
-        print("\nBrak wyników — sprawdź połączenie z internetem.")
+        log("Brak wyników z wystarczającą liczbą tradów.")
+        pd.DataFrame(columns=["rank","address","total_txs","total_btc_in","total_btc_out",
+                               "status","closed_trades","win_rate","avg_pnl_pct",
+                               "total_profit_usd","avg_buy_price","smart_score",
+                               "discovered_inflow_btc"]).to_csv(OUTPUT_CSV, index=False)
         return
 
-    df      = pd.DataFrame(results)
-    traders = df[df["status"] == "TRADER"].sort_values("smart_score", ascending=False).copy()
-    hodlers = df[df["status"] == "HODLER"].copy()
-    final   = pd.concat([traders, hodlers], ignore_index=True)
-    final.insert(0, "rank", range(1, len(final) + 1))
-    final.to_csv(OUTPUT_CSV, index=False)
-
-    new_cached = len(cache) - cached_prices
+    df    = pd.DataFrame(results).sort_values("smart_score", ascending=False)
+    df.insert(0, "rank", range(1, len(df) + 1))
+    df.to_csv(OUTPUT_CSV, index=False)
 
     print("\n" + "=" * 62)
-    print(f"  Przeanalizowano:  {len(results)} adresów")
-    print(f"  Traderzy:         {len(traders)}")
-    print(f"  Hodlerzy:         {len(hodlers)}")
-    print(f"  Nowych cen w cache: {new_cached}")
-
-    if not traders.empty:
-        print(f"\n  TOP 10 SMART MONEY:\n")
-        print(f"  {'#':<4} {'Adres':<36} {'Win%':<8} {'AvgPnL%':<10} {'Trades':<8} {'Score'}")
-        print(f"  {'─' * 68}")
-        for i, (_, r) in enumerate(traders.head(10).iterrows(), 1):
-            print(f"  {i:<4} {r['address']:<36} {str(r['win_rate']):<8} {str(r['avg_pnl_pct']):<10} {int(r['closed_trades']):<8} {r['smart_score']}")
-
-    print(f"\n  Wyniki: {OUTPUT_CSV}")
+    log(f"Kandydaci zbadani: {len(top_candidates)}")
+    log(f"Z wystarczającą historią: {len(results)}")
+    log(f"\nTOP 10 SMART MONEY:\n")
+    print(f"  {'#':<4} {'Adres':<36} {'Win%':<8} {'AvgPnL%':<10} {'Trades':<8} {'Score'}")
+    print(f"  {'─' * 68}")
+    for i, (_, r) in enumerate(df.head(10).iterrows(), 1):
+        print(f"  {i:<4} {r['address']:<36} {str(r['win_rate']):<8} {str(r['avg_pnl_pct']):<10} {int(r['closed_trades']):<8} {r['smart_score']}")
+    log(f"\nWyniki: {OUTPUT_CSV}")
     print("=" * 62)
 
 if __name__ == "__main__":
