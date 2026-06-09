@@ -24,7 +24,7 @@ MAX_CANDIDATES      = 150    # max adresów do analizy
 MAX_TX_PER_ADDR     = 60     # max transakcji na adres
 MIN_BTC_FLOW        = 0.05   # min BTC per transakcja (filtr szumu)
 MIN_TRADES          = 2      # min zamkniętych tradów żeby wejść do rankingu
-MIN_PNL_PCT         = 6.0    # min % różnicy ceny kupno→sprzedaż żeby liczyć jako trade
+MIN_PNL_PCT         = 3.0    # min % różnicy ceny kupno→sprzedaż żeby liczyć jako trade
 SLEEP_API           = 0.3
 OUTPUT_CSV          = "grubasy_ranking.csv"
 CACHE_FILE          = "grubasy_price_cache_v2.json"
@@ -179,35 +179,32 @@ def get_top_receivers_from_block(block_hash, min_btc=MIN_BTC_INFLOW, max_addrs=2
 
 def get_price(timestamp_ms, cache):
     """
-    Pobiera cenę BTC/USD dla danego timestamp z dokładnością godzinową.
-    Używa Krakena OHLC 1h jako primary (Binance zablokowany 451).
-    Cache key = timestamp zaokrąglony do godziny.
+    Pobiera cenę BTC/USD dla danego timestamp.
+    Używa Krakena OHLC dziennego — stabilne, sprawdzone.
+    Cache key = timestamp zaokrąglony do dnia.
     """
-    hour_ts = (timestamp_ms // 3_600_000) * 3_600_000
-    key = str(hour_ts)
+    day_ts = (timestamp_ms // 86_400_000) * 86_400_000
+    key = "d_" + str(day_ts)
     if key in cache:
         return cache[key]
 
-    hour_s = hour_ts // 1000  # timestamp w sekundach
+    day_s = day_ts // 1000
 
-    # Kraken OHLC 1h — since musi być PRZED żądaną świecą
-    # Pobieramy okno 10 świec wokół żądanego czasu
     try:
-        since = hour_s - 3600 * 2  # 2h wcześniej żeby na pewno złapać świecę
+        since = day_s - 86400 * 2  # 2 dni wcześniej żeby na pewno złapać świecę
         r = requests.get(
             "https://api.kraken.com/0/public/OHLC",
-            params={"pair": "XBTUSD", "interval": 60, "since": since},
+            params={"pair": "XBTUSD", "interval": 1440, "since": since},
             headers=HEADERS, timeout=15
         )
         if r.status_code == 200:
             ohlc = r.json().get("result", {}).get("XXBTZUSD", [])
             if ohlc:
-                # Znajdź świecę której timestamp == hour_s (lub najbliższą)
-                exact = [row for row in ohlc if int(row[0]) == hour_s]
+                exact = [row for row in ohlc if int(row[0]) == day_s]
                 if exact:
-                    price = float(exact[0][4])  # close
+                    price = float(exact[0][4])
                 else:
-                    closest = min(ohlc, key=lambda x: abs(int(x[0]) - hour_s))
+                    closest = min(ohlc, key=lambda x: abs(int(x[0]) - day_s))
                     price = float(closest[4])
                 cache[key] = price
                 save_cache(cache)
@@ -215,24 +212,8 @@ def get_price(timestamp_ms, cache):
     except:
         pass
 
-    # Binance fallback (może działać z innych IP)
-    try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1h", "startTime": hour_ts, "limit": 1},
-            headers=HEADERS, timeout=15
-        )
-        if r.status_code == 200 and r.json():
-            price = float(r.json()[0][4])
-            cache[key] = price
-            save_cache(cache)
-            return price
-    except:
-        pass
-
     return None
 
-# ── KROK 5: Analiza portfela ──────────────────────────────────────────────────
 
 def get_address_txs(address):
     for attempt in range(3):
