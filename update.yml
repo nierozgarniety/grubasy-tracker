@@ -1,0 +1,32 @@
+name: Aktualizuj grubasy
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'   # co 4 godziny
+  workflow_dispatch:          # możesz też odpalić ręcznie z GitHuba
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instaluj zależności
+        run: pip install requests pandas numpy tqdm
+
+      - name: Uruchom tracker
+        run: python btc_smart_money_tracker.py
+
+      - name: Zapisz wyniki do repo
+        run: |
+          git config user.name "grubasy-bot"
+          git config user.email "bot@grubasy"
+          git add grubasy_ranking.csv grubasy_price_cache.json
+          git diff --staged --quiet || git commit -m "Update $(date -u '+%Y-%m-%d %H:%M') UTC"
+          git push
