@@ -247,7 +247,7 @@ def parse_flows(address, txs):
         spent = sum(
             inp.get("prevout", {}).get("value", 0)
             for inp in tx.get("vin", [])
-            if inp.get("prevout", {}).get("scriptpubkey_address") == address
+            if inp and inp.get("prevout") and inp.get("prevout", {}).get("scriptpubkey_address") == address
         )
         received = sum(
             out.get("value", 0)
