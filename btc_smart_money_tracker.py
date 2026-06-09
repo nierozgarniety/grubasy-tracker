@@ -24,9 +24,10 @@ MAX_CANDIDATES      = 150    # max adresów do analizy
 MAX_TX_PER_ADDR     = 60     # max transakcji na adres
 MIN_BTC_FLOW        = 0.05   # min BTC per transakcja (filtr szumu)
 MIN_TRADES          = 2      # min zamkniętych tradów żeby wejść do rankingu
+MIN_PNL_PCT         = 6.0    # min % różnicy ceny kupno→sprzedaż żeby liczyć jako trade
 SLEEP_API           = 0.3
 OUTPUT_CSV          = "grubasy_ranking.csv"
-CACHE_FILE          = "grubasy_price_cache.json"
+CACHE_FILE          = "grubasy_price_cache_v2.json"
 # ════════════════════════════════════════════════
 
 HEADERS = {
@@ -177,12 +178,44 @@ def get_top_receivers_from_block(block_hash, min_btc=MIN_BTC_INFLOW, max_addrs=2
 # ── KROK 4: Cena BTC dla timestamp ───────────────────────────────────────────
 
 def get_price(timestamp_ms, cache):
+    """
+    Pobiera cenę BTC/USD dla danego timestamp z dokładnością godzinową.
+    Używa Krakena OHLC 1h jako primary (Binance zablokowany 451).
+    Cache key = timestamp zaokrąglony do godziny.
+    """
     hour_ts = (timestamp_ms // 3_600_000) * 3_600_000
     key = str(hour_ts)
     if key in cache:
         return cache[key]
 
-    # Binance
+    hour_s = hour_ts // 1000  # timestamp w sekundach
+
+    # Kraken OHLC 1h — since musi być PRZED żądaną świecą
+    # Pobieramy okno 10 świec wokół żądanego czasu
+    try:
+        since = hour_s - 3600 * 2  # 2h wcześniej żeby na pewno złapać świecę
+        r = requests.get(
+            "https://api.kraken.com/0/public/OHLC",
+            params={"pair": "XBTUSD", "interval": 60, "since": since},
+            headers=HEADERS, timeout=15
+        )
+        if r.status_code == 200:
+            ohlc = r.json().get("result", {}).get("XXBTZUSD", [])
+            if ohlc:
+                # Znajdź świecę której timestamp == hour_s (lub najbliższą)
+                exact = [row for row in ohlc if int(row[0]) == hour_s]
+                if exact:
+                    price = float(exact[0][4])  # close
+                else:
+                    closest = min(ohlc, key=lambda x: abs(int(x[0]) - hour_s))
+                    price = float(closest[4])
+                cache[key] = price
+                save_cache(cache)
+                return price
+    except:
+        pass
+
+    # Binance fallback (może działać z innych IP)
     try:
         r = requests.get(
             "https://api.binance.com/api/v3/klines",
@@ -192,26 +225,8 @@ def get_price(timestamp_ms, cache):
         if r.status_code == 200 and r.json():
             price = float(r.json()[0][4])
             cache[key] = price
+            save_cache(cache)
             return price
-    except:
-        pass
-
-    # Kraken fallback
-    try:
-        since = hour_ts // 1000 - 3600
-        r = requests.get(
-            "https://api.kraken.com/0/public/OHLC",
-            params={"pair": "XBTUSD", "interval": 60, "since": since},
-            headers=HEADERS, timeout=15
-        )
-        if r.status_code == 200:
-            ohlc = r.json().get("result", {}).get("XXBTZUSD", [])
-            if ohlc:
-                target = hour_ts // 1000
-                closest = min(ohlc, key=lambda x: abs(int(x[0]) - target))
-                price = float(closest[4])
-                cache[key] = price
-                return price
     except:
         pass
 
@@ -286,13 +301,15 @@ def analyze(address, flows, cache):
                 buy = buy_stack[0]
                 matched = min(remaining, buy["btc"])
                 pnl_pct = (f["price"] - buy["price"]) / buy["price"] * 100
-                trades.append({
-                    "buy_date": buy["date"], "sell_date": f["date"],
-                    "btc": matched, "buy_price": buy["price"],
-                    "sell_price": f["price"], "pnl_pct": pnl_pct,
-                    "profit_usd": matched * (f["price"] - buy["price"]),
-                    "win": pnl_pct > 0
-                })
+                # Liczymy tylko ruchy ≥ MIN_PNL_PCT% (w górę lub w dół)
+                if abs(pnl_pct) >= MIN_PNL_PCT:
+                    trades.append({
+                        "buy_date": buy["date"], "sell_date": f["date"],
+                        "btc": matched, "buy_price": buy["price"],
+                        "sell_price": f["price"], "pnl_pct": pnl_pct,
+                        "profit_usd": matched * (f["price"] - buy["price"]),
+                        "win": pnl_pct > 0
+                    })
                 buy["btc"] -= matched
                 remaining -= matched
                 if buy["btc"] < 0.0001:
