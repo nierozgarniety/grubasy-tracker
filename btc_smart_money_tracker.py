@@ -15,10 +15,10 @@ from datetime import datetime, timezone, timedelta
 from tqdm import tqdm
 
 # ════════════════════════════════════════════════
-TOP_PUMPS           = 10     # ile pompów szukamy
-MIN_PUMP_PCT        = 15     # minimalny % wzrostu w 72h
+TOP_PUMPS           = 15     # ile pompów szukamy
+MIN_PUMP_PCT        = 8      # minimalny % wzrostu w 72h
 WINDOW_BEFORE_H     = 72     # godziny przed pompem (max)
-WINDOW_AFTER_H      = 24     # godziny przed pompem (min — żeby nie liczyć "podczas")
+WINDOW_AFTER_H      = 6      # godziny przed pompem (min)
 MIN_BTC_INFLOW      = 0.5    # minimalny wpływ BTC żeby uznać za kandydata
 MAX_CANDIDATES      = 150    # max adresów do analizy
 MAX_TX_PER_ADDR     = 60     # max transakcji na adres
@@ -109,27 +109,44 @@ def find_pumps(prices, min_pump_pct=MIN_PUMP_PCT, window_days=3, top_n=TOP_PUMPS
 def get_blocks_in_window(ts_pump_start, hours_before_min, hours_before_max):
     """
     Znajdź bloki BTC z okna [ts_pump_start - hours_before_max, ts_pump_start - hours_before_min].
-    Używa mempool.space /api/v1/blocks/:timestamp
+    Iteruje przez strony bloków mempool.space aż pokryje całe okno.
     """
     ts_window_end   = ts_pump_start - hours_before_min * 3600
     ts_window_start = ts_pump_start - hours_before_max * 3600
 
     blocks = []
-    try:
-        # Pobierz bloki zaczynając od końca okna
-        r = requests.get(
-            f"https://mempool.space/api/v1/blocks/{ts_window_end}",
-            headers=HEADERS, timeout=20
-        )
-        if r.status_code == 200:
-            data = r.json()
-            for block in data:
+    cursor_ts = ts_window_end  # zaczynamy od końca okna i idziemy wstecz
+
+    for _ in range(30):  # max 30 stron = 450 bloków
+        try:
+            r = requests.get(
+                f"https://mempool.space/api/v1/blocks/{cursor_ts}",
+                headers=HEADERS, timeout=20
+            )
+            if r.status_code != 200:
+                break
+            page = r.json()
+            if not page:
+                break
+
+            added = 0
+            for block in page:
                 bt = block.get("timestamp", 0)
-                if ts_window_start <= bt <= ts_window_end:
+                if bt < ts_window_start:
+                    return blocks  # wyszliśmy poza okno
+                if bt <= ts_window_end:
                     blocks.append(block)
-        time.sleep(SLEEP_API)
-    except Exception as e:
-        pass
+                    added += 1
+
+            # Następna strona — od najstarszego bloku na tej stronie
+            cursor_ts = page[-1].get("timestamp", 0) - 1
+            time.sleep(SLEEP_API)
+
+            if added == 0:
+                break
+
+        except Exception:
+            break
 
     return blocks
 
