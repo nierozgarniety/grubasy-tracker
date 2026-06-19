@@ -10,7 +10,7 @@ KROK 4: Zbierz unikalne adresy → policz win rate / smart score dla każdego
 KROK 5: Ranking → grubasy_ranking.csv
 """
 
-import requests, pandas as pd, numpy as np, time, json, os, sys
+import requests, pandas as pd, numpy as np, time, json, os, sys, bisect
 from datetime import datetime, timezone, timedelta
 from tqdm import tqdm
 
@@ -39,16 +39,16 @@ def log(msg): print(f"  {msg}", flush=True)
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
-def load_cache():
-    try:
-        with open(CACHE_FILE) as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_cache(cache):
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f)
+def build_price_index(prices):
+    """
+    prices: lista (ts_sekundy, close) z get_btc_price_history().
+    Zwraca (days, closes) — dwie równoległe listy posortowane po dniu (północ UTC),
+    gotowe do binary search w get_price. Budowane RAZ na cały run, bez zapytań API.
+    """
+    s = sorted(prices, key=lambda x: x[0])
+    days   = [(int(ts) // 86400) * 86400 for ts, _ in s]
+    closes = [float(c) for _, c in s]
+    return days, closes
 
 # ── KROK 1: Historia ceny BTC + znajdź pompy ─────────────────────────────────
 
@@ -177,41 +177,37 @@ def get_top_receivers_from_block(block_hash, min_btc=MIN_BTC_INFLOW, max_addrs=2
 
 # ── KROK 4: Cena BTC dla timestamp ───────────────────────────────────────────
 
-def get_price(timestamp_ms, cache):
+def get_price(timestamp_ms, price_index, tol_days=2):
     """
-    Pobiera cenę BTC/USD dla danego timestamp.
-    Używa Krakena OHLC dziennego — stabilne, sprawdzone.
-    Cache key = timestamp zaokrąglony do dnia.
+    Cena BTC/USD dla danego timestampu — lookup w serii dziennej, zero zapytań API.
+
+    Zasada anty-kolaps: jeśli dzień jest POZA zakresem serii, zwraca None
+    (a NIE najbliższą graniczną świecę — to był bug, który mapował 54% odczytów
+    na jedną cenę 80848.5 i rozwalał każdy smart_score). W zakresie: dokładny
+    dzień, a przy luce — najbliższy w granicach tol_days.
     """
-    day_ts = (timestamp_ms // 86_400_000) * 86_400_000
-    key = "d_" + str(day_ts)
-    if key in cache:
-        return cache[key]
+    days, closes = price_index
+    if not days:
+        return None
 
-    day_s = day_ts // 1000
+    day_ts = (timestamp_ms // 86_400_000) * 86_400  # ms -> sekundy, północ UTC
 
-    try:
-        since = day_s - 86400 * 2  # 2 dni wcześniej żeby na pewno złapać świecę
-        r = requests.get(
-            "https://api.kraken.com/0/public/OHLC",
-            params={"pair": "XBTUSD", "interval": 1440, "since": since},
-            headers=HEADERS, timeout=15
-        )
-        if r.status_code == 200:
-            ohlc = r.json().get("result", {}).get("XXBTZUSD", [])
-            if ohlc:
-                exact = [row for row in ohlc if int(row[0]) == day_s]
-                if exact:
-                    price = float(exact[0][4])
-                else:
-                    closest = min(ohlc, key=lambda x: abs(int(x[0]) - day_s))
-                    price = float(closest[4])
-                cache[key] = price
-                save_cache(cache)
-                return price
-    except:
-        pass
+    if day_ts < days[0] or day_ts > days[-1]:
+        return None  # poza zakresem serii — nie zgadujemy ceny
 
+    i = bisect.bisect_left(days, day_ts)
+    if i < len(days) and days[i] == day_ts:
+        return closes[i]
+
+    # luka w serii (rzadkie dla danych dziennych) — najbliższy w granicach tol_days
+    best_i, best_d = None, None
+    for j in (i - 1, i):
+        if 0 <= j < len(days):
+            d = abs(days[j] - day_ts)
+            if best_d is None or d < best_d:
+                best_d, best_i = d, j
+    if best_i is not None and best_d <= tol_days * 86400:
+        return closes[best_i]
     return None
 
 
@@ -262,12 +258,12 @@ def parse_flows(address, txs):
         })
     return flows
 
-def analyze(address, flows, cache):
+def analyze(address, flows, price_index):
     if not flows:
         return None
     flows = sorted(flows, key=lambda x: x["timestamp"])
     for f in flows:
-        f["price"] = get_price(f["timestamp_ms"], cache)
+        f["price"] = get_price(f["timestamp_ms"], price_index)
     flows = [f for f in flows if f["price"]]
     if not flows:
         return None
@@ -336,8 +332,6 @@ def main():
         except Exception as e:
             log(f"{name}: BŁĄD ({e})")
 
-    cache = load_cache()
-
     # KROK 1: Pompy
     print()
     prices = get_btc_price_history()
@@ -345,6 +339,8 @@ def main():
         log("Brak historii ceny — przerywam.")
         pd.DataFrame().to_csv(OUTPUT_CSV, index=False)
         return
+
+    price_index = build_price_index(prices)
 
     pumps = find_pumps(prices)
     if not pumps:
@@ -386,14 +382,10 @@ def main():
     for i, (addr, inflow) in enumerate(tqdm(top_candidates, desc="Analiza")):
         txs   = get_address_txs(addr)
         flows = parse_flows(addr, txs)
-        res   = analyze(addr, flows, cache)
+        res   = analyze(addr, flows, price_index)
         if res:
             res["discovered_inflow_btc"] = round(inflow, 4)
             results.append(res)
-        if i % 15 == 0:
-            save_cache(cache)
-
-    save_cache(cache)
 
     if not results:
         log("Brak wyników z wystarczającą liczbą tradów.")
