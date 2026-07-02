@@ -1,9 +1,9 @@
 rank,address,total_txs,total_btc_in,total_btc_out,status,closed_trades,win_rate,avg_pnl_pct,total_profit_usd,avg_buy_price,smart_score,discovered_inflow_btc
 1,bc1qhhz3g6qsumlw8w6n4shwddcdjmthepyze5z748,36,96.8184,2462.8256,TRADER,22,100.0,104.6,5915941.0,58781.0,81.38,4.4944
 2,bc1qg5h4u7lsdzvvnpzj7dnwnj57gk5eu5ysvxsnz9,25,486.3823,486.3843,TRADER,18,100.0,39.2,13693339.0,72618.0,61.75,36.3852
-3,bc1qmflmqnc3q0ka73vnwg0l0p3s977qm6g7zt2dhr,47,3449.0434,4619.063,TRADER,14,71.4,1.5,1885957.0,109631.0,36.17,999.9998
-4,bc1qgdnwv0uad57ch8543egpjtwtdkzm63h0fxv2g7,15,5.9541,29.5304,TRADER,9,55.6,21.5,126758.0,78172.0,34.24,4.9732
-5,bc1pfewahnqzlz2ga6yw88yskqjp8wqnqfrchwvu4ewwhmqg5k74nhzstxz4mm,45,51.0,57.7764,TRADER,5,100.0,3.8,7962.0,59490.0,31.96,61.7244
+3,bc1pfewahnqzlz2ga6yw88yskqjp8wqnqfrchwvu4ewwhmqg5k74nhzstxz4mm,45,51.0,58.6892,TRADER,6,100.0,3.4,9182.0,59490.0,38.26,61.7244
+4,bc1qmflmqnc3q0ka73vnwg0l0p3s977qm6g7zt2dhr,47,3449.0434,4619.063,TRADER,14,71.4,1.5,1885957.0,109631.0,36.17,999.9998
+5,bc1qgdnwv0uad57ch8543egpjtwtdkzm63h0fxv2g7,15,5.9541,29.5304,TRADER,9,55.6,21.5,126758.0,78172.0,34.24,4.9732
 6,bc1quf8klcjkmnszm5m4kg3sn97y5zm9eac4y9lfhn,5,3645.0052,3645.0053,TRADER,3,100.0,22.6,65311958.0,73961.0,21.29,357.0
 7,169bHcvs4FCLqLYGKnGbMUuqPEFTzpkqrJ,49,60.3495,63.7724,TRADER,21,42.9,-3.0,-89344.0,71474.0,20.52,18.1364
 8,14wUxq4jj7HWkDdAnCf2jakhCMDd79C3f8,44,96.0186,96.0186,TRADER,3,100.0,5.2,52296.0,109585.0,19.33,6.5193
