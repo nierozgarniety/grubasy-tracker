@@ -1,9 +1,9 @@
-name: Aktualizuj grubasy
+name: Aktualizuj grubasów
 
 on:
   schedule:
-    - cron: '0 */4 * * *'   # co 4 godziny
-  workflow_dispatch:          # możesz też odpalić ręcznie z GitHuba
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
 
 jobs:
   update:
@@ -21,12 +21,15 @@ jobs:
         run: pip install requests pandas numpy tqdm
 
       - name: Uruchom tracker
-        run: python btc_smart_money_tracker.py
+        run: python eth_smart_money_tracker.py
+        env:
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+        continue-on-error: true
 
       - name: Zapisz wyniki do repo
         run: |
           git config user.name "grubasy-bot"
           git config user.email "bot@grubasy"
-          git add grubasy_ranking.csv grubasy_price_cache.json
+          git add -f grubasy_ranking.csv eth_price_cache.json pumps_cache.json 2>/dev/null || true
           git diff --staged --quiet || git commit -m "Update $(date -u '+%Y-%m-%d %H:%M') UTC"
-          git push
+          git push || true
