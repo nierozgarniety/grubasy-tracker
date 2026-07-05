@@ -33,7 +33,6 @@ MIN_MOVE_PCT       = 3.0     # min |ruch ceny| żeby rotacja była "rozstrzygni�
 MIN_DECISIVE       = 3       # min rozstrzygniętych rotacji żeby wejść do rankingu
 SLEEP_ETHERSCAN    = 0.38    # 3 req/s limit → ~2.6 req/s bezpiecznie
 OUTPUT_CSV         = "grubasy_ranking.csv"
-PRICE_CACHE_FILE   = "eth_price_cache.json"
 PUMPS_CACHE_FILE   = "pumps_cache.json"
 # ════════════════════════════════════════════════
 
